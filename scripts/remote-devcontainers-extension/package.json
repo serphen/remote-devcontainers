@@ -1,0 +1,44 @@
+{
+	"name": "resolver",
+	"displayName": "Dev Containers - Web Resolver (remote-devcontainers)",
+	"description": "Resolves dev-container+<hex> authorities in the browser workbench, exactly like the Dev Containers extension's own resolver does on desktop. The desktop resolver lives on the node extension host, which a browser workbench never consults — this web-worker half is the browser equivalent. Does nothing on desktop.",
+	"version": "0.0.1",
+	"publisher": "remote-devcontainers",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.101.0"
+	},
+	"enabledApiProposals": [
+		"resolvers",
+		"tunnels",
+		"tunnelFactory"
+	],
+	"activationEvents": [
+		"onResolveRemoteAuthority:dev-container",
+		"onResolveRemoteAuthority:attached-container",
+		"onStartupFinished"
+	],
+	"contributes": {
+		"commands": [
+			{
+				"command": "remote-dev.showDevContainerLog",
+				"title": "Show Build Log",
+				"category": "Dev Containers"
+			},
+			{
+				"command": "remote-dev.stopContainer",
+				"title": "Stop Container",
+				"category": "Dev Containers"
+			}
+		],
+		"menus": {
+			"statusBar/remoteIndicator": [
+				{
+					"command": "remote-dev.stopContainer",
+					"group": "remote_90_remote-dev_0@0"
+				}
+			]
+		}
+	},
+	"browser": "./extension.js"
+}

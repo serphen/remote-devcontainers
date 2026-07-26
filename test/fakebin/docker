@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# fake docker for the e2e simulation: the "container" is THIS machine.
+# One container exists, once the fake devcontainer CLI "built" it (state
+# marker in $FAKE_STATE). Everything exec'd runs locally, so the daemon
+# install path of devcontainer-service executes for real. Every call is logged.
+set -u
+STATE="${FAKE_STATE:?FAKE_STATE unset}"
+ID="f4k3c0nt41n3r"
+echo "docker $*" >> "$STATE/docker-args.log"
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--context) shift 2 ;;
+		*) break ;;
+	esac
+done
+cmd="${1:-}"; [ $# -eq 0 ] || shift
+case "$cmd" in
+	version)
+		echo 'Client: Docker Engine - Community
+ Version:           26.1.4
+Server: Docker Engine - Community
+ Engine:
+  Version:          26.1.4'
+		;;
+	info)
+		echo 'Server:
+ Containers: 1
+  Running: 1
+ Server Version: 26.1.4
+ Driver: overlay2'
+		;;
+	ps)
+		# the publish HOLDER (another project, e.g. raven's scb container) is
+		# independent of the fake container's built state
+		case "$*" in
+			*publish=*) [ ! -f "$STATE/publish-holder" ] || echo "holdercontainer"; exit 0 ;;
+			*name=holdercontainer*) [ ! -f "$STATE/publish-holder" ] || echo "$ID holdercontainer"; exit 0 ;;
+		esac
+		# findContainer (running only) and dumpContainers (-a): same answer
+		if [ -f "$STATE/built" ]; then
+			case "$*" in
+				*devcontainer.local_folder*) echo "$ID fakecontainer" ;;
+				*name=fakecontainer*) echo "$ID fakecontainer" ;;
+				*vsch.local.volume*|*volume=*) [ ! -f "$STATE/vol-built" ] || echo "$ID fakevolcontainer" ;;
+				*) echo "fakecontainer | Up 1 minute | folder=/tmp/fake-ws" ;;
+			esac
+		fi
+		;;
+	inspect)
+		fmt="${1:-}"
+		case "$fmt" in
+			-f)
+				shift 2>/dev/null || true
+				fmt="${1:-}"; shift 2>/dev/null || true
+				case "$fmt" in
+					*IPAddress*)
+						ip -4 addr show 2>/dev/null | awk '$1=="inet" && $2 !~ /^127\./ {sub(/\/.*/, "", $2); print $2; exit}'
+						echo ;;
+					*Config.User*) whoami ;;
+					*Mounts*) echo ;;
+					*) echo ;;
+				esac
+				;;
+			*)
+				# bare `docker inspect <id>`. Three production failure shapes:
+				#  - no $STATE/built: the container is GONE (rm'd outside the
+				#    workbench) — a real docker would exit 1; here: the
+				#    stopped shape. The reconciler's liveness probe reads it.
+				#  - $STATE/broken-net (set by run.sh): the OrbStack half-
+				#    created container — Running, Networks={}, FOREVER
+				#    (compose never re-attaches). Only a `docker rm` clears
+				#    it. The resolver must heal via rm + fresh up.
+				#  - otherwise the FIRST inspect after the build answers
+				#    Running + Networks={} once (plumbing lags the start);
+				#    the retry then gets the compose-ish shape: first
+				#    network EMPTY (his real case), second with the IP.
+				if [ ! -f "$STATE/built" ]; then
+					echo '[{"NetworkSettings": {"Networks": {}, "Ports": {}}, "HostConfig": {"NetworkMode": "fake_net"}, "State": {"Running": false}}]'
+				elif [ -f "$STATE/broken-net" ]; then
+					echo '[{"NetworkSettings": {"Networks": {}, "Ports": {}}, "HostConfig": {"NetworkMode": "fake_net"}, "State": {"Running": true}}]'
+				elif [ ! -f "$STATE/inspect-lag" ]; then
+					touch "$STATE/inspect-lag"
+					echo '[{"NetworkSettings": {"Networks": {}, "Ports": {}}, "HostConfig": {"NetworkMode": "fake_net"}, "State": {"Running": true}}]'
+				else
+					IP="$(ip -4 addr show 2>/dev/null | awk '$1=="inet" && $2 !~ /^127\./ {sub(/\/.*/, "", $2); print $2; exit}')"
+					cat <<JSON
+[{"NetworkSettings": {"Networks": {"broken0": {"IPAddress": ""}, "project_net": {"IPAddress": "$IP"}, "IPAddress": ""}}, "HostConfig": {"NetworkMode": "project_net", "PortBindings": {"8080/tcp": [{"HostIp": "", "HostPort": "8080"}]}}, "State": {"Running": true}}]
+JSON
+				fi
+				;;
+		esac
+		;;
+	network)
+		# `docker network inspect <name>` — while the container is half-
+		# created the network's Containers map is empty (IPs leaked)
+		echo '[{"Name": "fake_net", "Containers": {}, "Status": {"IPAM": {"Subnets": {"192.168.107.0/24": {"IPsInUse": 3}}}}}]'
+		;;
+	rm)
+		# `docker rm -f <id>` — the heal: the half-created container goes
+		# away, the next `up` creates a properly attached one
+		rm -f "$STATE/built" "$STATE/broken-net"
+		echo "${@: -1}"
+		;;
+	volume)
+		# `docker volume ls [-q]` — clone-in-volume's __UNIQUE__ resolution
+		# looks the volume up by label; the seeded repo config implies it
+		case "$*" in
+			*ls*) [ ! -f "$STATE/vol-devcontainer.json" ] || echo "test-vol" ;;
+			*) echo ;;
+		esac
+		;;
+	images)
+		# same for image listings
+		echo ;;
+	stop)
+		# `docker stop <id>` — the container goes down, `up` starts it again
+		rm -f "$STATE/built" "$STATE/publish-holder"
+		echo "${@: -1}"
+		;;
+	cp)
+		src="${1:?}"; dst="${2:?}"
+		cp -r "$src" "${dst#*:}"
+		;;
+	run)
+		# the volume helper: `docker run --rm -v <vol>:/w:ro alpine sh -c 'cat …'`
+		# — answers the seeded repo config (clone-in-volume builds read it)
+		if [ -f "$STATE/vol-devcontainer.json" ]; then
+			cat "$STATE/vol-devcontainer.json"
+		fi
+		;;
+	compose)
+		# the devcontainer-orchestrator's direct re-run of the CLI's failed command:
+		# `docker compose … up -d` — "starts" the container (state marker).
+		# $STATE/compose-port-fail=PORT[:N][:v6]: fail the way docker does when the
+		# publish port is occupied (raven's 8080 recreate), N times (default 1)
+		# — the service must release its own bind and retry, absorb the
+		# OrbStack release lag (wait + retry), or name the holder.
+		# `config --format json` answers a services doc (the ephemeral-ports
+		# override is generated from it); an rdv-ephemeral override in the args
+		# neutralizes the collision → the up succeeds.
+		case "$*" in
+			*config*json*)
+				echo '{"services":{"app":{"ports":[{"target":8080,"published":"8080","protocol":"tcp"},{"target":8787,"published":"8787","protocol":"tcp"}]}}}' ;;
+			*up*-d*)
+				if [ -f "$STATE/compose-port-fail" ]; then
+					case "$*" in
+						*rdv-ephemeral*) ;;
+						*)
+							RAW="$(cat "$STATE/compose-port-fail")"
+							ADDR="0.0.0.0"
+							case "$RAW" in *:v6) ADDR="::"; RAW="${RAW%:v6}" ;; esac
+							PORT="${RAW%%:*}"; N="${RAW##*:}"
+							[ "$N" != "$RAW" ] || N=1
+							N=$((N - 1))
+							if [ "$N" -gt 0 ]; then echo "$PORT:$N" > "$STATE/compose-port-fail"; else rm -f "$STATE/compose-port-fail"; fi
+							echo "Container fakecontainer Recreate"
+							echo "Container fakecontainer Recreated"
+							echo "Container fakecontainer Starting"
+							echo "Error response from daemon: driver failed programming external connectivity on endpoint fakecontainer (f4k3c0nt41n3r): Bind for $ADDR:$PORT failed: port is already allocated" >&2
+							exit 1
+							;;
+					esac
+				fi
+				touch "$STATE/built"; echo "Container fakecontainer Started" ;;
+			*version*) echo "2.29.1" ;;
+			*) echo "fake docker: unhandled compose: $*" >&2; exit 1 ;;
+		esac
+		;;
+	exec)
+		# docker exec [--user U] <id> <cmd…> — run locally, ignore the user
+		if [ "${1:-}" = "--user" ]; then shift 2; fi
+		shift # the id
+		"$@"
+		;;
+	*)
+		echo "fake docker: unhandled: $cmd $*" >&2
+		exit 1
+		;;
+esac

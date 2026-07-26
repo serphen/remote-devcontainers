@@ -1,0 +1,8 @@
+# runtime/ is gone — nothing local in the deliverable
+node_modules/
+out/
+*.vsix
+test/tmp/
+__pycache__/
+.DS_Store
+runtime/

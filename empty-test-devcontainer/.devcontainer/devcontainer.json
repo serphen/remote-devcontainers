@@ -1,0 +1,9 @@
+{
+	"name": "remote-dev test",
+	"image": "mcr.microsoft.com/devcontainers/base:alpine",
+	"customizations": {
+		"vscode": {
+			"extensions": []
+		}
+	}
+}
